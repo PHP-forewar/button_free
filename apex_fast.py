@@ -736,9 +736,11 @@ class TradingEngine:
                 self._vwap_diff(price, ticker) >= PRICE_ABOVE_AVG)
 
     def _ok_short(self, score, spike, funding, price, ticker) -> bool:
+        # Block SHORT only when funding is LONG_BIAS (shorts already pay premium)
+        # NEUTRAL or SHORT_BIAS → allowed
         return (score <= SHORT_THRESHOLD and
                 spike and
-                funding == "SHORT_BIAS" and
+                funding != "LONG_BIAS" and
                 self._vwap_diff(price, ticker) <= -PRICE_BELOW_AVG)
 
 # ══════════════════════════════════════════════════════════════════
