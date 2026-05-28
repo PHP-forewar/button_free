@@ -36,11 +36,18 @@ def _clr(value: float, pos_clr=G, neg_clr=R, zero_clr=W) -> str:
     return zero_clr
 
 def _bar(score: float, width: int = 10) -> str:
-    """ASCII progress bar representing abs(score) / 100."""
+    """ASCII progress bar. Green for bullish, red for bearish."""
     filled = int(abs(score) / 100 * width)
     filled = min(filled, width)
     clr = G if score >= 0 else R
     bar = clr + "█" * filled + DG + "░" * (width - filled) + RST
+    return f"[{bar}]"
+
+def _short_progress(score: float, threshold: float = -65, width: int = 8) -> str:
+    """Show how close score is to SHORT threshold as a red bar."""
+    pct    = min(abs(score) / abs(threshold), 1.0)
+    filled = int(pct * width)
+    bar    = R + "█" * filled + DG + "░" * (width - filled) + RST
     return f"[{bar}]"
 
 def _fmt_price(p: float) -> str:
@@ -164,15 +171,20 @@ class TerminalDisplay:
             block    = sig.get("block_reason")
             conf     = sig.get("confidence", 0.0)
 
-            price_str   = f"{_fmt_price(price):>10}"
-            score_clr   = _clr(score)
-            score_str   = f"{score_clr}{score:>+6.1f}{RST}"
-            bar_str     = _bar(score, 10)
-            conf_str    = f"{abs(conf):>3.0f}%"
-            whale_str   = _whale_icon(whale)
-            fund_str    = _funding_str(token)
-            dir_str     = _signal_dir(direction)
-            status_str  = (DG + f"{block[:18]}" + RST) if block else (dir_str)
+            price_str  = f"{_fmt_price(price):>10}"
+            score_clr  = _clr(score)
+            score_str  = f"{score_clr}{score:>+6.1f}{RST}"
+            # For SHORT direction, show progress toward -65 threshold in red
+            if direction == "SHORT" and score < 0:
+                bar_str  = _short_progress(score, config.SHORT_THRESHOLD, 10)
+                conf_str = f"{min(abs(score)/abs(config.SHORT_THRESHOLD)*100, 100):>3.0f}%"
+            else:
+                bar_str  = _bar(score, 10)
+                conf_str = f"{abs(conf):>3.0f}%"
+            whale_str  = _whale_icon(whale)
+            fund_str   = _funding_str(token)
+            dir_str    = _signal_dir(direction)
+            status_str = (DG + f"{block[:18]}" + RST) if block else dir_str
 
             row = (f" {W}{token:<7}{RST}"
                    f"{price_str}  "

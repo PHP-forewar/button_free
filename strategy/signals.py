@@ -239,22 +239,28 @@ class SignalEngine:
 
         if direction == "LONG":
             if score < config.LONG_THRESHOLD:
-                return f"Score {score:.0f} < {config.LONG_THRESHOLD}"
+                return f"Score {score:.0f} (need >{config.LONG_THRESHOLD})"
             if cvd == "DIVERGE":
-                return "CVD divergence (sell into rally)"
+                return "CVD diverge (vol/price)"
             if oi == "FAKE":
-                return "OI/price diverge (fake move)"
+                return "OI diverge (fake)"
             if whale == "BEARISH_WHALE":
-                return "Bearish whale detected"
+                return "Bearish whale"
             if price_near_cluster(price, liq.get("long_cluster"), 1.5):
-                return "Near long liquidation cluster"
+                return "Near liq cluster"
+
         elif direction == "SHORT":
             if score > config.SHORT_THRESHOLD:
-                return f"Score {score:.0f} > {config.SHORT_THRESHOLD}"
+                return f"Score {score:.0f} (need <{config.SHORT_THRESHOLD})"
+            # CVD DIVERGE = narx yuqori lekin volume past (bearish signal)
+            if cvd != "DIVERGE":
+                return f"CVD: {cvd} (need DIVERGE)"
+            # SHORT_BIAS = longs to'layapti = short imkoniyat
             if funding != "SHORT_BIAS":
-                return f"Funding not SHORT_BIAS ({funding})"
+                return f"Fund: {funding} (need SHORT_BIAS)"
             if price_near_cluster(price, liq.get("short_cluster"), 1.5):
-                return "Near short liquidation cluster"
+                return "Near short liq cluster"
+
         return None
 
 
