@@ -731,15 +731,13 @@ class TradingEngine:
             return 0.0
 
     def _ok_long(self, score, spike, price, ticker) -> bool:
+        # spike already boosts score ×1.2 in combined_score
         return (score >= LONG_THRESHOLD and
-                spike and
                 self._vwap_diff(price, ticker) >= PRICE_ABOVE_AVG)
 
     def _ok_short(self, score, spike, funding, price, ticker) -> bool:
         # Block SHORT only when funding is LONG_BIAS (shorts already pay premium)
-        # NEUTRAL or SHORT_BIAS → allowed
         return (score <= SHORT_THRESHOLD and
-                spike and
                 funding != "LONG_BIAS" and
                 self._vwap_diff(price, ticker) <= -PRICE_BELOW_AVG)
 
