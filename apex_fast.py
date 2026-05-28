@@ -53,13 +53,13 @@ BET_TIERS: List[Tuple[float, float, float]] = [
 ]
 
 # ── Signal thresholds ──────────────────────────────────────────
-LONG_THRESHOLD   = 45.0
-SHORT_THRESHOLD  = -45.0
+LONG_THRESHOLD   = 32.0   # was 45 – reached in normal market
+SHORT_THRESHOLD  = -32.0  # was -45
 
 # ── Entry filters ──────────────────────────────────────────────
-PRICE_ABOVE_AVG  = 0.5    # LONG:  price > vwap + 0.5%
-PRICE_BELOW_AVG  = 0.5    # SHORT: price < vwap - 0.5%
-VOL_SPIKE_RATIO  = 3.0    # current-hour vs 24h avg hourly
+PRICE_ABOVE_AVG  = 0.2    # LONG:  price > vwap + 0.2%  (was 0.5)
+PRICE_BELOW_AVG  = 0.2    # SHORT: price < vwap - 0.2%  (was 0.5)
+VOL_SPIKE_RATIO  = 1.5    # current-hour vs 24h avg  (was 3.0)
 
 # ── Funding ─────────────────────────────────────────────────────
 FUNDING_HIGH =  0.05      # % – longs paying → SHORT bias
