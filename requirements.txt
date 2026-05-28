@@ -1,0 +1,6 @@
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+colorama>=0.4.6
+# ta-lib requires the C library: apt install libta-lib-dev  then pip install ta-lib
+# Indicators are implemented natively in strategy/signals.py so ta-lib is optional.

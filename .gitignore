@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+trades.csv
+bot.log
+.env
