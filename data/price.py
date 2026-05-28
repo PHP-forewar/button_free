@@ -1,4 +1,8 @@
-"""Jupiter Price API + Binance ticker. Caches results to reduce API load."""
+"""
+Price data layer.
+Priority: Jupiter → Binance → CoinGecko (simple price)
+Caches results to reduce API load.
+"""
 
 import time
 import logging
@@ -11,7 +15,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ─── generic TTL cache ────────────────────────────────────────────────────────
+# ─── Generic TTL cache ────────────────────────────────────────────────────────
 
 class _Cache:
     def __init__(self, ttl: float):
@@ -32,7 +36,7 @@ class _Cache:
             self._ts[key]    = time.time()
 
 
-# ─── HTTP helper with exponential backoff ─────────────────────────────────────
+# ─── HTTP helper (1 attempt, no retry – callers handle fallback) ──────────────
 
 def _get(url: str, params=None, headers=None, timeout=8) -> Optional[dict]:
     delay = 2
@@ -56,30 +60,114 @@ def _get(url: str, params=None, headers=None, timeout=8) -> Optional[dict]:
     return None
 
 
-# ─── Price data ───────────────────────────────────────────────────────────────
+# ─── Price sources ────────────────────────────────────────────────────────────
 
 _price_cache = _Cache(config.CACHE_PRICE_TTL)
 
-def get_jupiter_prices() -> Dict[str, float]:
-    """Return {symbol: usd_price} for all configured tokens via Jupiter."""
-    cached = _price_cache.get("jupiter")
-    if cached is not None:
-        return cached
 
-    ids = ",".join(config.TOKENS.keys())
-    data = _get(config.JUPITER_PRICE_URL, params={"ids": ids})
+def _from_jupiter() -> Dict[str, float]:
+    ids  = ",".join(config.TOKENS.keys())
+    data = _get(config.JUPITER_PRICE_URL, params={"ids": ids}, timeout=6)
     result: Dict[str, float] = {}
-
     if data and "data" in data:
         for sym, info in data["data"].items():
             try:
                 result[sym] = float(info["price"])
             except (KeyError, TypeError, ValueError):
                 pass
-
-    if result:
-        _price_cache.set("jupiter", result)
     return result
+
+
+def _from_binance() -> Dict[str, float]:
+    """Fetch all spot prices from Binance in one call."""
+    # GET /api/v3/ticker/price with no symbol returns all tickers
+    data = _get(config.BINANCE_TICKER_URL, timeout=8)
+    if not data:
+        return {}
+
+    # data is a list of {symbol, price} dicts
+    lookup: Dict[str, float] = {}
+    if isinstance(data, list):
+        for item in data:
+            try:
+                lookup[item["symbol"]] = float(item["price"])
+            except (KeyError, TypeError, ValueError):
+                pass
+    elif isinstance(data, dict):
+        # single symbol response
+        try:
+            lookup[data["symbol"]] = float(data["price"])
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    result: Dict[str, float] = {}
+    for token, symbol in config.BINANCE_SPOT_SYMBOLS.items():
+        if symbol in lookup:
+            result[token] = lookup[symbol]
+    return result
+
+
+def _from_coingecko() -> Dict[str, float]:
+    """CoinGecko simple price API – works everywhere, no key needed."""
+    ids     = ",".join(config.COINGECKO_IDS.values())
+    url     = f"{config.COINGECKO_BASE_URL}/simple/price"
+    params  = {"ids": ids, "vs_currencies": "usd"}
+    data    = _get(url, params=params, timeout=12)
+    if not data:
+        return {}
+
+    # invert mapping: coingecko_id -> token_symbol
+    inv = {v: k for k, v in config.COINGECKO_IDS.items()}
+    result: Dict[str, float] = {}
+    for cg_id, prices in data.items():
+        token = inv.get(cg_id)
+        if token:
+            try:
+                result[token] = float(prices["usd"])
+            except (KeyError, TypeError, ValueError):
+                pass
+    return result
+
+
+# ─── Public interface ─────────────────────────────────────────────────────────
+
+def get_prices() -> Dict[str, float]:
+    """
+    Return {symbol: usd_price} for all configured tokens.
+    Tries Jupiter → Binance → CoinGecko until one succeeds.
+    """
+    cached = _price_cache.get("prices")
+    if cached is not None:
+        return cached
+
+    # 1. Jupiter
+    result = _from_jupiter()
+    if result:
+        logger.debug("Prices from Jupiter (%d tokens)", len(result))
+        _price_cache.set("prices", result)
+        return result
+
+    # 2. Binance
+    result = _from_binance()
+    if result:
+        logger.info("Jupiter unavailable – using Binance prices (%d tokens)", len(result))
+        _price_cache.set("prices", result)
+        return result
+
+    # 3. CoinGecko
+    result = _from_coingecko()
+    if result:
+        logger.info("Binance unavailable – using CoinGecko prices (%d tokens)", len(result))
+        _price_cache.set("prices", result)
+        return result
+
+    logger.warning("All price sources failed")
+    return {}
+
+
+# Keep old name for backward compatibility
+def get_jupiter_prices() -> Dict[str, float]:
+    return get_prices()
 
 
 def get_btc_price() -> Optional[float]:
@@ -87,6 +175,7 @@ def get_btc_price() -> Optional[float]:
     if cached is not None:
         return cached
 
+    # Try Binance first
     data = _get(config.BINANCE_TICKER_URL, params={"symbol": "BTCUSDT"})
     if data:
         try:
@@ -94,6 +183,17 @@ def get_btc_price() -> Optional[float]:
             _price_cache.set("btc", price)
             return price
         except (KeyError, ValueError):
+            pass
+
+    # Fallback: CoinGecko
+    data = _get(f"{config.COINGECKO_BASE_URL}/simple/price",
+                params={"ids": "bitcoin", "vs_currencies": "usd"})
+    if data:
+        try:
+            price = float(data["bitcoin"]["usd"])
+            _price_cache.set("btc", price)
+            return price
+        except (KeyError, TypeError, ValueError):
             pass
     return None
 
