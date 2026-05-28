@@ -9,6 +9,7 @@ Usage:  python apex_fast.py
 """
 
 import os, sys, csv, time, logging, traceback
+from datetime import timezone
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -336,16 +337,11 @@ class SignalEngine:
         except (TypeError, ValueError):
             price_chg = 0.0
 
-        # Normalise price change: cap at ±15 % → ±100 pts
-        pc_norm = float(np.clip(price_chg / 15.0 * 100.0, -100, 100))
+        # Normalise price change: ±4% → ±100 pts  (was ÷15, too insensitive)
+        pc_norm = float(np.clip(price_chg / 4.0 * 100.0, -100, 100))
 
-        # Volume ratio: compare token vs median of all tokens
-        try:
-            own_vol = float(ticker.get("quoteVolume", 0))
-        except (TypeError, ValueError):
-            own_vol = 0.0
-        # Normalised to [-30, +30] contribution (placeholder, overridden below)
-        vol_norm = 0.0   # filled in combined_score where all tickers available
+        # Placeholder; vol_norm is injected in combined_score (needs all tickers)
+        vol_norm = 0.0
 
         # RSI signal
         prices = price_history.get(symbol)
@@ -388,8 +384,8 @@ class SignalEngine:
             own_vol = 0.0
 
         vol_ratio = own_vol / median_vol if median_vol > 0 else 1.0
-        vol_norm  = float(np.clip((vol_ratio - 1.0) * 30.0, -30, 30))
-        # Inject vol into momentum
+        # vol_ratio 2x → +100 pts contribution, 0.5x → -50 pts
+        vol_norm  = float(np.clip((vol_ratio - 1.0) * 100.0, -100, 100))
         mom += vol_norm * 0.3
         mom  = float(np.clip(mom, -100, 100))
 
@@ -648,7 +644,7 @@ class Portfolio:
     def _log(self, pos: Position, exit_price: float,
              pnl_usd: float, pnl_pct: float, reason: str):
         row = {
-            "timestamp":            datetime.utcnow().isoformat(),
+            "timestamp":            datetime.now(timezone.utc).isoformat(),
             "symbol":               pos.symbol,
             "direction":            pos.direction,
             "entry_price":          round(pos.entry_price, 8),
@@ -797,7 +793,7 @@ def render(port: Portfolio, sigs: Dict[str, dict],
            btc_p: Optional[float], t0: float):
     os.system("cls" if os.name == "nt" else "clear")
 
-    now   = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     btcs  = f"BTC {_fp(btc_p)}" if btc_p else "BTC ---"
     up    = int(time.time() - t0)
     h, r  = divmod(up, 3600); m, s = divmod(r, 60)
@@ -841,12 +837,12 @@ def render(port: Portfolio, sigs: Dict[str, dict],
 
     # Top signals
     top = sorted(
-        [(s, d) for s, d in sigs.items() if abs(d.get("score", 0)) > 25],
+        [(s, d) for s, d in sigs.items() if abs(d.get("score", 0)) > 10],
         key=lambda x: abs(x[1]["score"]), reverse=True
     )[:6]
-    print(_row(BLD + "TOP SIGNALS  (score > 25)" + RST))
+    print(_row(BLD + f"TOP SIGNALS  (entry>±{LONG_THRESHOLD:.0f})" + RST))
     if not top:
-        print(_row(DG + "  No strong signals yet" + RST))
+        print(_row(DG + "  Signals below threshold" + RST))
     else:
         for sym, sig in top:
             sc    = sig["score"]
