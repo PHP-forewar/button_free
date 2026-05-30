@@ -11,10 +11,13 @@ o'qiladi (read-only public endpoints).
 
 Strategiya:
   * Tez scalping (12s skanerlash), moonbag YO'Q.
+  * IKKI TOMONLAMA: LONG (narx ko'tarilsa) VA SHORT (narx tushsa).
+    Yo'nalish avtomatik tanlanadi (ALLOW_LONG / ALLOW_SHORT).
   * 2 bosqichli kapital (DEGEN SPRINT -> PRO MODE I/II/III).
   * ATR asosida 2 ta TP/SL rejimi (1% micro-scalp / 2% momentum).
   * Confluence engine: 4 ta filtr (BTC trend, volume, momentum, funding).
-    Kirish uchun BARCHA 4 filtr yashil bo'lishi shart.
+    Kirish uchun BARCHA 4 filtr yashil bo'lishi shart (yo'nalishga mos).
+    SHORT uchun filtrlar teskari: BTC tushyapti, momentum manfiy, h.k.
 
 Ishga tushirish (Windows PowerShell):
     pip install requests pandas numpy colorama
@@ -94,19 +97,25 @@ TOKENS = {
 }
 PAIR_TO_NAME = {v: k for k, v in TOKENS.items()}
 
+# Savdo yo'nalishlari (ikki tomonlama)
+ALLOW_LONG = True            # narx ko'tarilishidan foyda
+ALLOW_SHORT = True           # narx tushishidan foyda
+
 # Confluence filtr chegaralari
-BTC_24H_FLOOR = -1.0         # BTC 24h > -1%
-VOL_RATIO_MIN = 1.5          # 24h vol / 7d avg >= 1.5
-MOM_MIN, MOM_MAX = 1.5, 3.0  # 30m o'zgarish [1.5%, 3.0%] (>10% = FOMO)
-FOMO_LEVEL = 10.0            # +10% dan oshsa FOMO
-FUNDING_MAX = 0.001          # funding < 0.1%
+BTC_24H_FLOOR = -1.0         # LONG:  BTC 24h > -1%
+BTC_24H_CEIL = 1.0           # SHORT: BTC 24h < +1%
+VOL_RATIO_MIN = 1.5          # 24h vol / 7d avg >= 1.5 (yo'nalishdan qat'i nazar)
+MOM_MIN, MOM_MAX = 1.5, 3.0  # 30m o'zgarish kattaligi [1.5%, 3.0%] (>10% = FOMO)
+FOMO_LEVEL = 10.0            # |o'zgarish| 10% dan oshsa FOMO/panika
+FUNDING_MAX = 0.001          # LONG:  funding < +0.1% (longlar qizimagan)
+FUNDING_MIN = -0.001         # SHORT: funding > -0.1% (shortlar qizimagan)
 
 # Fayllar
 CSV_FILE = "trades_sniper.csv"
 LOG_FILE = "bot_sniper.log"
 
 CSV_HEADER = [
-    "timestamp", "symbol", "mode", "stake", "leverage",
+    "timestamp", "symbol", "side", "mode", "stake", "leverage",
     "entry_price", "exit_price", "price_change_pct",
     "pnl_on_stake_pct", "pnl_usd", "fee", "result",
     "balance_after", "stage", "btc_1h", "volume_ratio", "funding",
@@ -310,16 +319,18 @@ class RateLimitedAPI:
 # ═══════════════════════════════════════════════════════════════════
 class Position:
     def __init__(self, name, pair, entry_price, stake, mode_info,
-                 stage, btc_1h, volume_ratio, funding):
+                 stage, btc_1h, volume_ratio, funding, side="LONG"):
         self.name = name
         self.pair = pair
+        self.side = side                          # "LONG" / "SHORT"
         self.entry_price = entry_price
         self.stake = stake
         self.position_size = stake * LEVERAGE     # 5x notional
         self.mode = mode_info["mode"]             # "1%" / "2%"
         self.mode_label = mode_info["label"]
-        self.tp = mode_info["tp"]                 # narx % (musbat)
-        self.sl = mode_info["sl"]                 # narx % (manfiy)
+        # tp/sl - POZITSIYA FOYDASIGA nisbatan (LONG ham, SHORT ham bir xil)
+        self.tp = mode_info["tp"]                 # foyda % (musbat)
+        self.sl = mode_info["sl"]                 # foyda % (manfiy)
         self.entry_time = time.time()
         # kirishdagi snapshot (CSV uchun)
         self.stage = stage
@@ -333,11 +344,18 @@ class Position:
         self.current_price = price
 
     def price_change_pct(self):
+        """Narxning xom o'zgarishi (yo'nalishsiz)."""
         return (self.current_price - self.entry_price) / self.entry_price * 100.0
+
+    def directional_change(self):
+        """Narx o'zgarishi POZITSIYA FOYDASIGA nisbatan.
+        LONG  -> +narx oshsa musbat;  SHORT -> +narx tushsa musbat."""
+        raw = self.price_change_pct()
+        return raw if self.side == "LONG" else -raw
 
     def pnl_on_stake_pct(self):
         # isolated margin: -100% dan past tushmaydi (likvidatsiya)
-        return max(self.price_change_pct() * LEVERAGE, -100.0)
+        return max(self.directional_change() * LEVERAGE, -100.0)
 
     def pnl_usd(self):
         return self.stake * (self.pnl_on_stake_pct() / 100.0)
@@ -347,11 +365,11 @@ class Position:
         return self.position_size * TAKER_FEE * 2
 
     def check_exit(self):
-        """'WIN' / 'LOSS' / None."""
-        chg = self.price_change_pct()
-        if chg >= self.tp:
+        """'WIN' / 'LOSS' / None - foydaga nisbatan TP/SL."""
+        d = self.directional_change()
+        if d >= self.tp:
             return "WIN"
-        if chg <= self.sl:
+        if d <= self.sl:
             return "LOSS"
         return None
 
@@ -362,31 +380,47 @@ class Position:
 # ═══════════════════════════════════════════════════════════════════
 # CONFLUENCE ENGINE - 4 TA FILTR
 # ═══════════════════════════════════════════════════════════════════
-def btc_filter(btc_1h, btc_24h):
-    """FILTR 1 - Ota Trend: BTC 1h > 0 VA BTC 24h > -1%."""
+def btc_filter(btc_1h, btc_24h, side="LONG"):
+    """FILTR 1 - Ota Trend (BTC).
+    LONG : BTC 1h > 0  VA  24h > -1%   (BTC ko'tarilyapti)
+    SHORT: BTC 1h < 0  VA  24h < +1%   (BTC tushyapti)
+    """
     if btc_1h is None or btc_24h is None:
         return False
+    if side == "SHORT":
+        return btc_1h < 0 and btc_24h < BTC_24H_CEIL
     return btc_1h > 0 and btc_24h > BTC_24H_FLOOR
 
 
 def volume_filter(volume_ratio):
-    """FILTR 2 - Volume portlashi: 24h vol / 7d avg >= 1.5."""
+    """FILTR 2 - Volume portlashi: 24h vol / 7d avg >= 1.5.
+    Yo'nalishdan qat'i nazar - faollik/qiziqish belgisi."""
     if volume_ratio is None:
         return False
     return volume_ratio >= VOL_RATIO_MIN
 
 
-def momentum_filter(change_30m):
-    """FILTR 3 - Mahalliy momentum: +1.5%..+3.0% (>10% = FOMO)."""
+def momentum_filter(change_30m, side="LONG"):
+    """FILTR 3 - Mahalliy momentum (|o'zgarish| 10% dan oshsa FOMO).
+    LONG :  +1.5% .. +3.0%   (yuqoriga harakat)
+    SHORT:  -3.0% .. -1.5%   (pastga harakat)
+    """
     if change_30m is None:
         return False
+    if side == "SHORT":
+        return -MOM_MAX <= change_30m <= -MOM_MIN
     return MOM_MIN <= change_30m <= MOM_MAX
 
 
-def funding_filter(funding):
-    """FILTR 4 - Funding rate < 0.1%."""
+def funding_filter(funding, side="LONG"):
+    """FILTR 4 - Funding rate.
+    LONG : funding < +0.1%   (longlar haddan tashqari qizimagan)
+    SHORT: funding > -0.1%   (shortlar haddan tashqari qizimagan)
+    """
     if funding is None:
         return False
+    if side == "SHORT":
+        return funding > FUNDING_MIN
     return funding < FUNDING_MAX
 
 
@@ -514,6 +548,17 @@ class MemeSniper:
 
     # ---- CSV ----
     def _init_csv(self):
+        # eski sarlavha mos kelmasa (masalan 'side' ustunsiz) - zaxiraga ko'chiramiz
+        if os.path.exists(CSV_FILE):
+            try:
+                with open(CSV_FILE, "r", encoding="utf-8") as f:
+                    first = f.readline().strip()
+                if first and first != ",".join(CSV_HEADER):
+                    bak = CSV_FILE + ".bak"
+                    os.replace(CSV_FILE, bak)
+                    logger.info("Eski CSV sarlavhasi mos emas -> %s", bak)
+            except Exception as e:
+                logger.error("CSV migratsiya xato: %s", e)
         if not os.path.exists(CSV_FILE):
             with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(CSV_HEADER)
@@ -522,7 +567,7 @@ class MemeSniper:
         with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                pos.name, pos.mode, f"{pos.stake:.2f}", LEVERAGE,
+                pos.name, pos.side, pos.mode, f"{pos.stake:.2f}", LEVERAGE,
                 fmt_price(pos.entry_price), fmt_price(exit_price),
                 f"{pos.price_change_pct():.3f}", f"{pos.pnl_on_stake_pct():.3f}",
                 f"{pnl_usd:.4f}", f"{fee:.4f}", result,
@@ -568,14 +613,16 @@ class MemeSniper:
         self.balance += pos.stake + pnl
         self.balance -= fee
         self.trades.append({
-            "name": pos.name, "mode": pos.mode, "result": result,
+            "name": pos.name, "side": pos.side, "mode": pos.mode,
+            "result": result,
             "price_change_pct": pos.price_change_pct(),
+            "directional_change": pos.directional_change(),
             "pnl_usd": pnl, "fee": fee, "hold": pos.hold_seconds(),
             "mode_label": pos.mode_label,
         })
         self._log_trade_csv(pos, result, pos.current_price, pnl, fee)
-        logger.info("CLOSE %s %s chg=%.2f%% pnl=%.2f fee=%.2f bal=%.2f",
-                    pos.name, result, pos.price_change_pct(), pnl, fee,
+        logger.info("CLOSE %s %s %s chg=%.2f%% pnl=%.2f fee=%.2f bal=%.2f",
+                    pos.side, pos.name, result, pos.price_change_pct(), pnl, fee,
                     self.balance)
 
         if len(self.trades) % STATS_EVERY_TRADES == 0:
@@ -630,25 +677,43 @@ class MemeSniper:
                 "volatility": vol,
                 "volume_ratio": ratio,
                 "funding": funding,
-                "is_fomo": (change_30m is not None and change_30m > FOMO_LEVEL),
+                "is_fomo": (change_30m is not None and abs(change_30m) > FOMO_LEVEL),
             }
 
-    def evaluate_filters(self, sig):
-        """4 filtr holatini qaytaradi (dict of bool)."""
+    def evaluate_filters(self, sig, side):
+        """Berilgan yo'nalish uchun 4 filtr holati (dict of bool)."""
         return {
-            "btc": btc_filter(self.btc_1h, self.btc_24h),
+            "btc": btc_filter(self.btc_1h, self.btc_24h, side),
             "volume": volume_filter(sig.get("volume_ratio")),
-            "momentum": momentum_filter(sig.get("change_30m")),
-            "funding": funding_filter(sig.get("funding")),
+            "momentum": momentum_filter(sig.get("change_30m"), side),
+            "funding": funding_filter(sig.get("funding"), side),
         }
 
+    def evaluate_token(self, sig):
+        """Token uchun eng yaxshi yo'nalishni tanlaydi -> (side, flags, score).
+        LONG va SHORT bir vaqtda 4/4 bo'la olmaydi (BTC/momentum teskari)."""
+        sides = []
+        if ALLOW_LONG:
+            sides.append("LONG")
+        if ALLOW_SHORT:
+            sides.append("SHORT")
+        if not sides:
+            sides = ["LONG"]
+        best = None
+        for side in sides:
+            flags = self.evaluate_filters(sig, side)
+            score = sum(flags.values())
+            if best is None or score > best[2]:
+                best = (side, flags, score)
+        return best
+
     def try_enter(self):
-        """Bo'sh slot bo'lsa, 4 filtr yashil tokenga kirish."""
+        """Bo'sh slot bo'lsa, 4 filtr yashil tokenga kirish (LONG yoki SHORT)."""
         if len(self.positions) >= MAX_POSITIONS:
             return
         # eng kuchli (eng ko'p yashil) tokenni birinchi ko'ramiz
         ranked = self.ranked_signals()
-        for pair, sig, flags, score in ranked:
+        for pair, sig, side, flags, score in ranked:
             if pair in self.positions:
                 continue
             # bloklagan filtrlarni statistikaga yozamiz
@@ -656,23 +721,22 @@ class MemeSniper:
                 if not ok:
                     self.filter_blocks[key] += 1
             if all(flags.values()):
-                self.enter_long(pair, sig)
+                self.open_position(pair, sig, side)
                 if len(self.positions) >= MAX_POSITIONS:
                     break
 
     def ranked_signals(self):
-        """[(pair, sig, flags, score)] - yashil filtrlar soni bo'yicha."""
+        """[(pair, sig, side, flags, score)] - yashil filtrlar soni bo'yicha."""
         out = []
         for pair, sig in self.signals.items():
-            flags = self.evaluate_filters(sig)
-            score = sum(flags.values())
-            out.append((pair, sig, flags, score))
-        # ko'proq yashil -> oldinroq; teng bo'lsa momentum yuqori bo'lgani
-        out.sort(key=lambda x: (x[3],
-                                x[1].get("change_30m") or -999), reverse=True)
+            side, flags, score = self.evaluate_token(sig)
+            out.append((pair, sig, side, flags, score))
+        # ko'proq yashil -> oldinroq; teng bo'lsa harakat kattaligi yuqori bo'lgani
+        out.sort(key=lambda x: (x[4], abs(x[1].get("change_30m") or 0)),
+                 reverse=True)
         return out
 
-    def enter_long(self, pair, sig):
+    def open_position(self, pair, sig, side):
         price = sig.get("price")
         if not price:
             return
@@ -684,15 +748,15 @@ class MemeSniper:
         mode_info = select_mode(sig.get("volatility"))
         pos = Position(
             name=sig["name"], pair=pair, entry_price=price, stake=stake,
-            mode_info=mode_info, stage=stage_name(self.balance),
+            mode_info=mode_info, side=side, stage=stage_name(self.balance),
             btc_1h=self.btc_1h, volume_ratio=sig.get("volume_ratio"),
             funding=sig.get("funding"),
         )
         self.balance -= stake          # jilov bloklanadi
         self.positions[pair] = pos
-        logger.info("ENTER LONG %s @ %s stake=%.2f size=%.2f mode=%s "
+        logger.info("ENTER %s %s @ %s stake=%.2f size=%.2f mode=%s "
                     "vol=%.2f%% btc1h=%s",
-                    pos.name, fmt_price(price), stake, pos.position_size,
+                    side, pos.name, fmt_price(price), stake, pos.position_size,
                     mode_info["label"],
                     sig.get("volatility") or 0.0, signed(self.btc_1h))
 
@@ -731,27 +795,32 @@ class MemeSniper:
 
         # confluence filtrlar
         lines.append(row(cyan("CONFLUENCE FILTRLAR")))
-        btc_ok = btc_filter(self.btc_1h, self.btc_24h)
-        lines.append(row(f"BTC Trend:  {light('', btc_ok)} "
-                         f"1h{signed(self.btc_1h)} 24h{signed(self.btc_24h)}"))
+        lines.append(row(f"Bozor: BTC 1h{signed(self.btc_1h)} "
+                         f"24h{signed(self.btc_24h)} -> {self._btc_regime()}"))
 
         nearest = self._nearest_signal()
         if nearest:
-            pair, sig, flags, score = nearest
-            lines.append(row(f"Eng yaqin signal: {yellow(sig['name'])}"))
+            pair, sig, side, flags, score = nearest
+            side_tag = green(f"[{side}]") if side == "LONG" else red(f"[{side}]")
+            dirword = "long" if side == "LONG" else "short"
+            lines.append(row(f"Eng yaqin signal: {yellow(sig['name'])} {side_tag}"))
+            lines.append(row(f"  BTC:      {light('', flags['btc'])} "
+                             f"({dirword} uchun mos)"))
             ratio = sig.get("volume_ratio")
             lines.append(row(f"  Volume:   {light('', flags['volume'])} "
                              f"{(f'{ratio:.1f}x' if ratio else 'n/a')} "
                              f"(kerak {VOL_RATIO_MIN}x)"))
             ch = sig.get("change_30m")
             mom_extra = " FOMO!" if sig.get("is_fomo") else ""
+            need = (f"+{MOM_MIN}..{MOM_MAX}%" if side == "LONG"
+                    else f"-{MOM_MIN}..-{MOM_MAX}%")
             lines.append(row(f"  Momentum: {light('', flags['momentum'])} "
-                             f"{signed(ch)}{mom_extra} (kerak +{MOM_MIN}..{MOM_MAX}%)"))
+                             f"{signed(ch)}{mom_extra} (kerak {need})"))
             fr = sig.get("funding")
             lines.append(row(f"  Funding:  {light('', flags['funding'])} "
                              f"{(signed(fr*100,'%',3) if fr is not None else 'n/a')}"))
             if all(flags.values()):
-                tail = green("4/4 yashil, KIRISH!")
+                tail = green(f"4/4 yashil, {side} KIRISH!")
             else:
                 tail = yellow(f"{score}/4 yashil, kutilmoqda")
             lines.append(row(f"  -> {tail}"))
@@ -763,16 +832,18 @@ class MemeSniper:
         lines.append(row(cyan(f"AKTIV POZITSIYALAR ({len(self.positions)}/{MAX_POSITIONS})")))
         if self.positions:
             for pos in self.positions.values():
-                chg = pos.price_change_pct()
+                dchg = pos.directional_change()       # foydaga nisbatan
                 pnl_pct = pos.pnl_on_stake_pct()
-                col = green if chg >= 0 else red
+                col = green if dchg >= 0 else red
+                scol = green if pos.side == "LONG" else red
                 lines.append(row(
-                    f"LONG {pos.name:<5} entry:${fmt_price(pos.entry_price)} "
+                    f"{scol(pos.side.ljust(5))} {pos.name:<5} "
+                    f"entry:${fmt_price(pos.entry_price)} "
                     f"now:${fmt_price(pos.current_price)} "
-                    f"{col(signed(chg))} ({col(signed(pnl_pct))})"))
-                state = green("foydada") if chg >= 0 else red("zararda")
+                    f"{col(signed(dchg))} ({col(signed(pnl_pct))})"))
+                state = green("foydada") if dchg >= 0 else red("zararda")
                 lines.append(row(f"  TP:+{pos.tp:g}% SL:{pos.sl:g}%  "
-                                 f"[{state}]  {pos.mode} rejim"))
+                                 f"[{state}]  {pos.side} {pos.mode}"))
         else:
             lines.append(row("  ochiq pozitsiya yo'q"))
         lines.append(sep())
@@ -783,10 +854,12 @@ class MemeSniper:
             for t in self.trades[-4:][::-1]:
                 col = green if t["result"] == "WIN" else red
                 ml = "1% scalp" if t["mode"] == "1%" else "2% momentum"
+                scol = green if t.get("side") == "LONG" else red
+                side_lbl = scol((t.get("side") or "LONG").ljust(5))
+                dchg = t.get("directional_change", t["price_change_pct"])
                 lines.append(row(
-                    f"{t['name']:<5} {col(t['result'].ljust(4))} "
-                    f"{col(signed(t['price_change_pct']))} "
-                    f"({col(money(t['pnl_usd']))})  {ml}"))
+                    f"{side_lbl} {t['name']:<5} {col(t['result'].ljust(4))} "
+                    f"{col(signed(dchg))} ({col(money(t['pnl_usd']))})  {ml}"))
         else:
             lines.append(row("  hali savdo yo'q"))
         lines.append(sep())
@@ -798,10 +871,18 @@ class MemeSniper:
 
     def _nearest_signal(self):
         ranked = self.ranked_signals()
-        for pair, sig, flags, score in ranked:
-            if pair not in self.positions:
-                return (pair, sig, flags, score)
+        for item in ranked:
+            if item[0] not in self.positions:   # item[0] = pair
+                return item
         return ranked[0] if ranked else None
+
+    def _btc_regime(self):
+        """BTC qaysi yo'nalishga ruxsat berishini ko'rsatadi."""
+        if btc_filter(self.btc_1h, self.btc_24h, "LONG"):
+            return green("LONG bozor")
+        if btc_filter(self.btc_1h, self.btc_24h, "SHORT"):
+            return red("SHORT bozor")
+        return yellow("neytral")
 
     def _display_mode(self):
         nearest = self._nearest_signal()
@@ -839,6 +920,15 @@ class MemeSniper:
                 lines.append(f"  {label:<16}: {n:>3} savdo, WR {wr:5.1f}%")
             else:
                 lines.append(f"  {label:<16}: savdo yo'q")
+
+        # LONG vs SHORT
+        for side in ("LONG", "SHORT"):
+            sub = [t for t in self.trades if t.get("side") == side]
+            if sub:
+                w = sum(1 for t in sub if t["result"] == "WIN")
+                pnl = sum(t["pnl_usd"] for t in sub)
+                lines.append(f"  {side:<16}: {len(sub):>3} savdo, "
+                             f"WR {w/len(sub)*100:5.1f}%  ({money(pnl)})")
 
         avg_hold = sum(t["hold"] for t in self.trades) / total
         lines.append(f"  O'rtacha hold     : {avg_hold:5.1f}s "
@@ -947,17 +1037,34 @@ def _selftest():
           b["mode"] == "2%" and b["tp"] == 2.0 and b["sl"] == -2.0)
     check("select_mode default -> 2%", d["mode"] == "2%")
 
-    # filtrlar
-    check("btc_filter green", btc_filter(0.8, 2.1) is True)
-    check("btc_filter red (1h<=0)", btc_filter(-0.2, 2.1) is False)
-    check("btc_filter red (24h<=-1)", btc_filter(0.8, -1.5) is False)
+    # filtrlar - LONG
+    check("btc_filter LONG green", btc_filter(0.8, 2.1) is True)
+    check("btc_filter LONG red (1h<=0)", btc_filter(-0.2, 2.1) is False)
+    check("btc_filter LONG red (24h<=-1)", btc_filter(0.8, -1.5) is False)
     check("volume_filter 1.8x green", volume_filter(1.8) is True)
     check("volume_filter 1.2x red", volume_filter(1.2) is False)
-    check("momentum 2.0 green", momentum_filter(2.0) is True)
-    check("momentum 0.7 red (past)", momentum_filter(0.7) is False)
-    check("momentum 12 red (FOMO)", momentum_filter(12.0) is False)
-    check("funding 0.0002 green", funding_filter(0.0002) is True)
-    check("funding 0.0015 red", funding_filter(0.0015) is False)
+    check("momentum LONG 2.0 green", momentum_filter(2.0) is True)
+    check("momentum LONG 0.7 red (past)", momentum_filter(0.7) is False)
+    check("momentum LONG 12 red (FOMO)", momentum_filter(12.0) is False)
+    check("funding LONG 0.0002 green", funding_filter(0.0002) is True)
+    check("funding LONG 0.0015 red", funding_filter(0.0015) is False)
+
+    # filtrlar - SHORT (teskari)
+    check("btc_filter SHORT green (1h<0,24h<1)",
+          btc_filter(-0.5, -0.3, "SHORT") is True)
+    check("btc_filter SHORT red (1h>0)", btc_filter(0.5, -0.3, "SHORT") is False)
+    check("btc_filter SHORT red (24h>=1)",
+          btc_filter(-0.5, 1.5, "SHORT") is False)
+    check("momentum SHORT -2.0 green", momentum_filter(-2.0, "SHORT") is True)
+    check("momentum SHORT +2.0 red", momentum_filter(2.0, "SHORT") is False)
+    check("momentum SHORT -0.7 red (past)",
+          momentum_filter(-0.7, "SHORT") is False)
+    check("momentum SHORT -12 red (panika)",
+          momentum_filter(-12.0, "SHORT") is False)
+    check("funding SHORT -0.0002 green",
+          funding_filter(-0.0002, "SHORT") is True)
+    check("funding SHORT -0.0015 red",
+          funding_filter(-0.0015, "SHORT") is False)
 
     # indikatorlar (sun'iy klines: [t,o,h,l,c,v,ct,qv,...])
     kl = []
@@ -996,6 +1103,32 @@ def _selftest():
     pos.update(0.70)  # -30% narx -> -150% stake -> kap -100%
     check("isolated kap -100% (likvidatsiya)",
           abs(pos.pnl_on_stake_pct() + 100.0) < 1e-9)
+
+    # SHORT pozitsiya matematikasi (narx tushsa foyda)
+    ps = Position("WIF", "WIFUSDT", 1.0, 100.0, mi, "DEGEN SPRINT",
+                  -0.8, 1.8, -0.0002, side="SHORT")
+    ps.update(0.98)  # narx -2% -> SHORT uchun +2% foyda
+    check("SHORT directional +2% @ narx -2%",
+          abs(ps.directional_change() - 2.0) < 1e-9)
+    check("SHORT pnl_on_stake = +10%",
+          abs(ps.pnl_on_stake_pct() - 10.0) < 1e-9)
+    check("SHORT pnl_usd = +10", abs(ps.pnl_usd() - 10.0) < 1e-9)
+    check("SHORT exit WIN @ narx -2%", ps.check_exit() == "WIN")
+    ps.update(1.02)  # narx +2% -> SHORT uchun -2% zarar
+    check("SHORT exit LOSS @ narx +2%", ps.check_exit() == "LOSS")
+
+    # yo'nalish tanlash (evaluate_token)
+    ev = MemeSniper.__new__(MemeSniper)
+    ev.btc_1h, ev.btc_24h = -0.5, -0.3                  # SHORT bozor
+    sig_s = {"name": "WIF", "price": 1.0, "change_30m": -2.0,
+             "volatility": 2.3, "volume_ratio": 1.8, "funding": -0.0002}
+    side_s, flags_s, score_s = ev.evaluate_token(sig_s)
+    check("evaluate_token -> SHORT 4/4", side_s == "SHORT" and score_s == 4)
+    ev.btc_1h, ev.btc_24h = 0.8, 2.1                    # LONG bozor
+    sig_l = {"name": "WIF", "price": 1.0, "change_30m": 2.0,
+             "volatility": 2.3, "volume_ratio": 1.8, "funding": 0.0002}
+    side_l, flags_l, score_l = ev.evaluate_token(sig_l)
+    check("evaluate_token -> LONG 4/4", side_l == "LONG" and score_l == 4)
 
     # close_position balans matematikasi
     sn = MemeSniper.__new__(MemeSniper)   # __init__ siz (CSV/log yo'q)
