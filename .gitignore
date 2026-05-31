@@ -1,0 +1,10 @@
+# meme_sniper runtime artifacts (paper trading logs/state)
+trades_sniper.csv
+bot_sniper.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
