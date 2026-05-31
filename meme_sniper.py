@@ -66,6 +66,9 @@ UPDATE_INTERVAL = 12         # soniya (tez skanerlash)
 MAX_POSITIONS = 3
 PAPER_TRADING = True         # real wallet YO'Q
 
+MAX_HOLD_MIN = 40            # vaqt-stop: pozitsiya shuncha daqiqa TP/SL'siz
+                             # qotsa, avtomatik yopiladi (slot bo'shaydi)
+
 TAKER_FEE = 0.0004           # 0.04% taker
 
 # Klines (ATR/momentum) va kunlik (7d volume) qayta-yuklash kadensi.
@@ -358,6 +361,10 @@ class Position:
     def hold_seconds(self):
         return time.time() - self.entry_time
 
+    def timed_out(self, max_hold_min):
+        """Vaqt-stop: pozitsiya max_hold_min daqiqadan ortiq ushlanganmi."""
+        return self.hold_seconds() >= max_hold_min * 60
+
 
 # ═══════════════════════════════════════════════════════════════════
 # CONFLUENCE ENGINE - 4 TA FILTR
@@ -582,12 +589,16 @@ class MemeSniper:
                 result = pos.check_exit()
                 if result:
                     self.close_position(pair, result)
+                elif pos.timed_out(MAX_HOLD_MIN):
+                    # TP/SL'ga yetmay qotdi -> joriy PnL bo'yicha yopamiz
+                    timed_res = "WIN" if pos.pnl_usd() >= 0 else "LOSS"
+                    self.close_position(pair, timed_res, timed=True)
         # ochiq bo'lmagan tokenlarning jonli narxini signal cache'ga yozamiz
         for pair in TOKENS.values():
             if pair in prices and pair in self.signals:
                 self.signals[pair]["price"] = prices[pair]
 
-    def close_position(self, pair, result):
+    def close_position(self, pair, result, timed=False):
         pos = self.positions.pop(pair)
         pnl = pos.pnl_usd()
         fee = pos.round_trip_fee()
@@ -596,7 +607,7 @@ class MemeSniper:
         self.balance -= fee
         self.trades.append({
             "name": pos.name, "side": pos.side, "mode": pos.mode,
-            "result": result,
+            "result": result, "timed": timed,
             "price_change_pct": pos.price_change_pct(),
             "directional_change": pos.directional_change(),
             "pnl_usd": pnl, "fee": fee, "hold": pos.hold_seconds(),
@@ -838,8 +849,10 @@ class MemeSniper:
                     f"now:${fmt_price(pos.current_price)} "
                     f"{col(signed(dchg))} ({col(signed(pnl_pct))})"))
                 state = green("foydada") if dchg >= 0 else red("zararda")
+                held = pos.hold_seconds() / 60.0
+                left = max(0.0, MAX_HOLD_MIN - held)
                 lines.append(row(f"  TP:+{pos.tp:g}% SL:{pos.sl:g}%  "
-                                 f"[{state}]  {pos.side} {pos.mode}"))
+                                 f"[{state}]  vaqt-stop {left:.0f}daq"))
         else:
             lines.append(row("  ochiq pozitsiya yo'q"))
         lines.append(sep())
@@ -854,9 +867,10 @@ class MemeSniper:
                 scol = green if t.get("side") == "LONG" else red
                 side_lbl = scol((t.get("side") or "LONG").ljust(5))
                 dchg = t.get("directional_change", t["price_change_pct"])
+                tag = " [vaqt]" if t.get("timed") else ""
                 lines.append(row(
                     f"{side_lbl} {t['name']:<5} {col(t['result'].ljust(4))} "
-                    f"{col(signed(dchg))} ({col(money(t['pnl_usd']))})  {ml}"))
+                    f"{col(signed(dchg))} ({col(money(t['pnl_usd']))})  {ml}{tag}"))
         else:
             lines.append(row("  hali savdo yo'q"))
         lines.append(sep())
@@ -1156,6 +1170,21 @@ def _selftest():
     # 100 (bo'sh) + stake 100 + pnl 10 - fee 0.4 = 209.6
     check("close WIN balans = 209.6", abs(sn.balance - 209.6) < 1e-6)
     check("trade qayd etildi", len(sn.trades) == 1)
+
+    # vaqt-stop (time-stop) mantiqi
+    p3 = Position("WIF", "WIFUSDT", 1.0, 100.0, mi2, "DEGEN SPRINT",
+                  0.5, 1.7, 0.0001)
+    check("timed_out yangi pozitsiya = False", p3.timed_out(MAX_HOLD_MIN) is False)
+    p3.entry_time = time.time() - (MAX_HOLD_MIN * 60 + 5)   # vaqt o'tdi
+    check("timed_out vaqt o'tgan = True", p3.timed_out(MAX_HOLD_MIN) is True)
+    # vaqt-stop minus PnL'da -> LOSS, timed bayrog'i
+    sn.balance = 100.0
+    sn.positions["WIFUSDT"] = p3
+    p3.update(0.99)  # -1% narx -> -5% stake -> -5 usd (TP/SL'ga yetmagan)
+    sn.close_position("WIFUSDT", "WIN" if p3.pnl_usd() >= 0 else "LOSS",
+                      timed=True)
+    check("vaqt-stop result = LOSS (-1%)", sn.trades[-1]["result"] == "LOSS")
+    check("vaqt-stop timed bayrog'i", sn.trades[-1]["timed"] is True)
 
     print("\n" + ("HAMMASI OK" if ok else "BA'ZI TESTLAR XATO"))
     return 0 if ok else 1
