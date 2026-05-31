@@ -766,30 +766,38 @@ class MemeSniper:
         clear_screen()
         lines = []
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        btc_arrow = "^" if (self.btc_1h or 0) > 0 else "v"
+        btc_24 = self.btc_24h or 0
+        btc_arrow = "^" if btc_24 > 0.1 else ("v" if btc_24 < -0.1 else "-")
         btc_p = fmt_price(self.btc_price) if self.btc_price else "n/a"
+        arrow_c = green(btc_arrow) if btc_arrow == "^" else (
+            red(btc_arrow) if btc_arrow == "v" else yellow(btc_arrow))
 
         lines.append(sep())
         title = (f"{cyan('5X MEME SNIPER')} | {now} | "
-                 f"BTC ${btc_p} {green(btc_arrow) if btc_arrow=='^' else red(btc_arrow)}")
+                 f"BTC ${btc_p} {arrow_c}")
         lines.append(row(title))
         lines.append(sep())
 
-        # kassa / bosqich
+        # kassa / bosqich — KASSA = bo'sh balans, JAMI = equity (jilov+pnl)
         wins = sum(1 for t in self.trades if t["result"] == "WIN")
         losses = sum(1 for t in self.trades if t["result"] == "LOSS")
         total = len(self.trades)
         wr = (wins / total * 100) if total else 0.0
+        eq = self.equity()
         roi = self.roi_pct()
         roi_s = green(signed(roi)) if roi >= 0 else red(signed(roi))
 
-        lines.append(row(f"KASSA: ${self.balance:,.2f}   |  "
-                         f"BOSQICH: {yellow(stage_name(self.balance))}"))
-        next_stake = get_stake(self.balance)
-        # joriy rejim = eng yaqin signalning rejimi (default 2% MOMENTUM)
-        cur_mode = self._display_mode()
-        lines.append(row(f"Jilov: ${next_stake:,.2f} ({stake_label(self.balance)})"
-                         f"   Rejim: {cur_mode}"))
+        locked = sum(p.stake for p in self.positions.values())
+        lines.append(row(f"KASSA: ${self.balance:,.2f}  JAMI: "
+                         f"${eq:,.2f}  |  {yellow(stage_name(eq))}"))
+        if self.positions:
+            lines.append(row(f"Jilov: ${locked:,.2f} ({len(self.positions)} "
+                             f"pozitsiya)   Rejim: {self._display_mode()}"))
+        else:
+            next_stake = get_stake(self.balance)
+            lines.append(row(f"Jilov: ${next_stake:,.2f} "
+                             f"({stake_label(self.balance)})"
+                             f"   Rejim: {self._display_mode()}"))
         lines.append(row(f"Savdo: {total}  W:{wins} L:{losses}  "
                          f"WR: {wr:.1f}%  ROI: {roi_s}"))
         lines.append(sep())
@@ -799,6 +807,10 @@ class MemeSniper:
         lines.append(row(f"Bozor: BTC 1h{signed(self.btc_1h)} "
                          f"24h{signed(self.btc_24h)} -> {self._btc_regime()}"))
 
+        slots_full = len(self.positions) >= MAX_POSITIONS
+        if slots_full:
+            lines.append(row(yellow(f"  SLOTLAR TO'LA ({MAX_POSITIONS}/{MAX_POSITIONS})"
+                                    " — TP/SL kutilmoqda")))
         nearest = self._nearest_signal()
         if nearest:
             pair, sig, side, flags, score = nearest
@@ -820,7 +832,9 @@ class MemeSniper:
             fr = sig.get("funding")
             lines.append(row(f"  Funding:  {light('', flags['funding'])} "
                              f"{(signed(fr*100,'%',3) if fr is not None else 'n/a')}"))
-            if score >= MIN_FILTERS:
+            if slots_full:
+                tail = yellow("slot bo'shaganda kiradi")
+            elif score >= MIN_FILTERS:
                 tail = green(f"{score}/4 yashil, {side} KIRISH!")
             else:
                 tail = yellow(f"{score}/4 yashil, kutilmoqda (kerak {MIN_FILTERS})")
@@ -879,9 +893,13 @@ class MemeSniper:
 
     def _btc_regime(self):
         """BTC qaysi yo'nalishga ruxsat berishini ko'rsatadi."""
-        if btc_filter(self.btc_1h, self.btc_24h, "LONG"):
+        l_ok = btc_filter(self.btc_1h, self.btc_24h, "LONG")
+        s_ok = btc_filter(self.btc_1h, self.btc_24h, "SHORT")
+        if l_ok and s_ok:
+            return yellow("LONG+SHORT (flat)")
+        if l_ok:
             return green("LONG bozor")
-        if btc_filter(self.btc_1h, self.btc_24h, "SHORT"):
+        if s_ok:
             return red("SHORT bozor")
         return yellow("neytral")
 
