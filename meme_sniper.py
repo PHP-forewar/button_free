@@ -176,18 +176,18 @@ def select_mode(volatility):
     """
     volatility = ATR(14) / current_price * 100
 
-    REJIM A - "1% MICRO-SCALP" (flat bozor): volatility < 1.5%
+    REJIM A - "0.6% MICRO-SCALP" (flat bozor): volatility < 1.5%
+        TP narx +0.6%  (stake +3%) ,  SL narx -0.9%  (stake -4.5%)
+    REJIM B - "1% SCALP" (faol bozor): volatility >= 1.5%
         TP narx +1.0%  (stake +5%) ,  SL narx -1.5%  (stake -7.5%)
-    REJIM B - "2% MOMENTUM" (faol bozor): volatility >= 1.5%
-        TP narx +2.0%  (stake +10%),  SL narx -2.0%  (stake -10%)
 
     Default: B (volatility None bo'lsa).
     """
     if volatility is not None and volatility < 1.5:
-        return {"mode": "1%", "label": "1% MICRO-SCALP",
-                "tp": 1.0, "sl": -1.5}
-    return {"mode": "2%", "label": "2% MOMENTUM",
-            "tp": 2.0, "sl": -2.0}
+        return {"mode": "0.6%", "label": "0.6% MICRO-SCALP",
+                "tp": 0.6, "sl": -0.9}
+    return {"mode": "1%", "label": "1% SCALP",
+            "tp": 1.0, "sl": -1.5}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -932,7 +932,7 @@ class MemeSniper:
             w = sum(1 for t in sub if t["result"] == "WIN")
             return len(sub), w / len(sub) * 100
 
-        for mode, label in (("1%", "1% MICRO-SCALP"), ("2%", "2% MOMENTUM")):
+        for mode, label in (("0.6%", "0.6% MICRO-SCALP"), ("1%", "1% SCALP")):
             r = wr_of(mode)
             if r:
                 n, wr = r
@@ -1050,11 +1050,11 @@ def _selftest():
     a = select_mode(0.8)
     b = select_mode(2.3)
     d = select_mode(None)
-    check("select_mode flat -> 1% (tp=1, sl=-1.5)",
-          a["mode"] == "1%" and a["tp"] == 1.0 and a["sl"] == -1.5)
-    check("select_mode faol -> 2% (tp=2, sl=-2)",
-          b["mode"] == "2%" and b["tp"] == 2.0 and b["sl"] == -2.0)
-    check("select_mode default -> 2%", d["mode"] == "2%")
+    check("select_mode flat -> 0.6% (tp=0.6, sl=-0.9)",
+          a["mode"] == "0.6%" and a["tp"] == 0.6 and a["sl"] == -0.9)
+    check("select_mode faol -> 1% (tp=1, sl=-1.5)",
+          b["mode"] == "1%" and b["tp"] == 1.0 and b["sl"] == -1.5)
+    check("select_mode default -> 1%", d["mode"] == "1%")
 
     # filtrlar - LONG (yumshatilgan chegaralar)
     check("btc_filter LONG green (1h flat)", btc_filter(0.0, 2.1) is True)
@@ -1110,7 +1110,7 @@ def _selftest():
     check("atr None (kam ma'lumot)", atr_from_klines(kl[:5], 14) is None)
 
     # pozitsiya matematikasi (5x)
-    mi = select_mode(2.3)  # 2% rejim
+    mi = select_mode(2.3)  # 1% rejim
     pos = Position("WIF", "WIFUSDT", 1.0, 100.0, mi, "DEGEN SPRINT",
                    0.8, 1.8, 0.0002)
     check("position_size = stake*5", pos.position_size == 500.0)
