@@ -91,9 +91,7 @@ TOKENS = {
     "PEPE":  "1000PEPEUSDT",
     "BONK":  "1000BONKUSDT",
     "DOGE":  "DOGEUSDT",
-    "FLOKI": "1000FLOKIUSDT",
     "SHIB":  "1000SHIBUSDT",
-    "NEIRO": "NEIROUSDT",
 }
 PAIR_TO_NAME = {v: k for k, v in TOKENS.items()}
 
@@ -138,15 +136,8 @@ if not logger.handlers:
 # KAPITAL BOSQICHLARI (AVTOPILOT)
 # ═══════════════════════════════════════════════════════════════════
 def get_stake(balance):
-    """Bosqichga qarab keyingi savdo uchun jilov (margin)."""
-    if balance < 1000:
-        return balance * 0.50      # DEGEN SPRINT (50%, variance past)
-    elif balance < 5000:
-        return 150.0               # PRO MODE I
-    elif balance < 10000:
-        return 300.0               # PRO MODE II
-    else:
-        return 600.0               # PRO MODE III
+    """Har doim balansning 80% — razgon rejimi (virtual pul)."""
+    return balance * 0.80
 
 
 def stage_name(balance):
@@ -162,11 +153,7 @@ def stage_name(balance):
 
 def stake_label(balance):
     """Dashboard uchun jilov foizi yorlig'i."""
-    if balance < 1000:
-        return "50%"
-    stake = get_stake(balance)
-    pct = (stake / balance * 100) if balance > 0 else 0.0
-    return f"~{pct:.0f}%"
+    return "80%"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1038,10 +1025,9 @@ def _selftest():
         print(f"  [{status}] {name}")
 
     # bosqichlar
-    check("get_stake DEGEN (200 -> 100)", abs(get_stake(200) - 100) < 1e-9)
-    check("get_stake PRO I (2000 -> 150)", get_stake(2000) == 150)
-    check("get_stake PRO II (6000 -> 300)", get_stake(6000) == 300)
-    check("get_stake PRO III (20000 -> 600)", get_stake(20000) == 600)
+    check("get_stake 80% (200 -> 160)", abs(get_stake(200) - 160) < 1e-9)
+    check("get_stake 80% (2000 -> 1600)", abs(get_stake(2000) - 1600) < 1e-9)
+    check("get_stake 80% (500 -> 400)", abs(get_stake(500) - 400) < 1e-9)
     check("stage_name 200 = DEGEN SPRINT", stage_name(200) == "DEGEN SPRINT")
     check("stage_name 12000 = PRO MODE III",
           stage_name(12000) == "PRO MODE III")
