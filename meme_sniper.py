@@ -14,7 +14,7 @@ Strategiya:
   * IKKI TOMONLAMA: LONG (narx ko'tarilsa) VA SHORT (narx tushsa).
     Yo'nalish avtomatik tanlanadi (ALLOW_LONG / ALLOW_SHORT).
   * 2 bosqichli kapital (DEGEN SPRINT -> PRO MODE I/II/III).
-  * ATR asosida 2 ta TP/SL rejimi (1% micro-scalp / 2% momentum).
+  * Bitta TP/SL rejimi: 4% SNIPER (TP +4% / SL -2%, 5x).
   * Confluence engine: 4 ta filtr (BTC trend, volume, momentum, funding).
     Kirish uchun BARCHA 4 filtr yashil bo'lishi shart (yo'nalishga mos).
     SHORT uchun filtrlar teskari: BTC tushyapti, momentum manfiy, h.k.
@@ -161,20 +161,14 @@ def stake_label(balance):
 # ═══════════════════════════════════════════════════════════════════
 def select_mode(volatility):
     """
-    volatility = ATR(14) / current_price * 100
+    volatility = ATR(14) / current_price * 100   (hozircha faqat ko'rsatkich)
 
-    REJIM A - "1% MICRO-SCALP" (flat bozor): volatility < 1.5%
-        TP narx +1.0%  (stake +5%) ,  SL narx -1.5%  (stake -7.5%)
-    REJIM B - "2% MOMENTUM" (faol bozor): volatility >= 1.5%
-        TP narx +2.0%  (stake +10%),  SL narx -2.0%  (stake -10%)
-
-    Default: B (volatility None bo'lsa).
+    BITTA REJIM - "4% SNIPER":
+        TP narx +4.0%  (stake +20%) ,  SL narx -2.0%  (stake -10%)
+        5x leverage, 2:1 reward/risk. Razgon uchun katta nishon.
     """
-    if volatility is not None and volatility < 1.5:
-        return {"mode": "1%", "label": "1% MICRO-SCALP",
-                "tp": 1.0, "sl": -1.5}
-    return {"mode": "2%", "label": "2% MOMENTUM",
-            "tp": 2.0, "sl": -2.0}
+    return {"mode": "4%", "label": "4% SNIPER",
+            "tp": 4.0, "sl": -2.0}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -314,7 +308,7 @@ class Position:
         self.entry_price = entry_price
         self.stake = stake
         self.position_size = stake * LEVERAGE     # 5x notional
-        self.mode = mode_info["mode"]             # "1%" / "2%"
+        self.mode = mode_info["mode"]             # "4%"
         self.mode_label = mode_info["label"]
         # tp/sl - POZITSIYA FOYDASIGA nisbatan (LONG ham, SHORT ham bir xil)
         self.tp = mode_info["tp"]                 # foyda % (musbat)
@@ -855,7 +849,8 @@ class MemeSniper:
         if self.trades:
             for t in self.trades[-4:][::-1]:
                 col = green if t["result"] == "WIN" else red
-                ml = "1% scalp" if t["mode"] == "1%" else "2% momentum"
+                ml = {"1%": "1% scalp", "2%": "2% momentum",
+                      "0.6%": "0.6% micro"}.get(t["mode"], "4% sniper")
                 scol = green if t.get("side") == "LONG" else red
                 side_lbl = scol((t.get("side") or "LONG").ljust(5))
                 dchg = t.get("directional_change", t["price_change_pct"])
@@ -919,7 +914,7 @@ class MemeSniper:
             w = sum(1 for t in sub if t["result"] == "WIN")
             return len(sub), w / len(sub) * 100
 
-        for mode, label in (("1%", "1% MICRO-SCALP"), ("2%", "2% MOMENTUM")):
+        for mode, label in (("4%", "4% SNIPER"),):
             r = wr_of(mode)
             if r:
                 n, wr = r
@@ -1036,11 +1031,10 @@ def _selftest():
     a = select_mode(0.8)
     b = select_mode(2.3)
     d = select_mode(None)
-    check("select_mode flat -> 1% (tp=1, sl=-1.5)",
-          a["mode"] == "1%" and a["tp"] == 1.0 and a["sl"] == -1.5)
-    check("select_mode faol -> 2% (tp=2, sl=-2)",
-          b["mode"] == "2%" and b["tp"] == 2.0 and b["sl"] == -2.0)
-    check("select_mode default -> 2%", d["mode"] == "2%")
+    check("select_mode -> 4% SNIPER (tp=4, sl=-2)",
+          a["mode"] == "4%" and a["tp"] == 4.0 and a["sl"] == -2.0)
+    check("select_mode har doim 4%",
+          b["mode"] == "4%" and d["mode"] == "4%")
 
     # filtrlar - LONG (yumshatilgan chegaralar)
     check("btc_filter LONG green (1h flat)", btc_filter(0.0, 2.1) is True)
@@ -1096,16 +1090,18 @@ def _selftest():
     check("atr None (kam ma'lumot)", atr_from_klines(kl[:5], 14) is None)
 
     # pozitsiya matematikasi (5x)
-    mi = select_mode(2.3)  # 2% rejim
+    mi = select_mode(2.3)  # 4% SNIPER rejim
     pos = Position("WIF", "WIFUSDT", 1.0, 100.0, mi, "DEGEN SPRINT",
                    0.8, 1.8, 0.0002)
     check("position_size = stake*5", pos.position_size == 500.0)
-    pos.update(1.02)  # +2% narx
+    pos.update(1.02)  # +2% narx (TP 4% hali emas)
     check("price_change_pct = +2%", abs(pos.price_change_pct() - 2.0) < 1e-9)
     check("pnl_on_stake = +10%", abs(pos.pnl_on_stake_pct() - 10.0) < 1e-9)
     check("pnl_usd = +10", abs(pos.pnl_usd() - 10.0) < 1e-9)
-    check("exit = WIN @ +2%", pos.check_exit() == "WIN")
-    pos.update(0.98)  # -2%
+    check("exit yo'q @ +2% (TP 4%)", pos.check_exit() is None)
+    pos.update(1.04)  # +4% narx -> TP
+    check("exit = WIN @ +4%", pos.check_exit() == "WIN")
+    pos.update(0.98)  # -2% -> SL
     check("exit = LOSS @ -2%", pos.check_exit() == "LOSS")
     check("round_trip_fee = 500*0.0004*2 = 0.4",
           abs(pos.round_trip_fee() - 0.4) < 1e-9)
@@ -1117,14 +1113,16 @@ def _selftest():
     # SHORT pozitsiya matematikasi (narx tushsa foyda)
     ps = Position("WIF", "WIFUSDT", 1.0, 100.0, mi, "DEGEN SPRINT",
                   -0.8, 1.8, -0.0002, side="SHORT")
-    ps.update(0.98)  # narx -2% -> SHORT uchun +2% foyda
+    ps.update(0.98)  # narx -2% -> SHORT uchun +2% foyda (TP 4% hali emas)
     check("SHORT directional +2% @ narx -2%",
           abs(ps.directional_change() - 2.0) < 1e-9)
     check("SHORT pnl_on_stake = +10%",
           abs(ps.pnl_on_stake_pct() - 10.0) < 1e-9)
     check("SHORT pnl_usd = +10", abs(ps.pnl_usd() - 10.0) < 1e-9)
-    check("SHORT exit WIN @ narx -2%", ps.check_exit() == "WIN")
-    ps.update(1.02)  # narx +2% -> SHORT uchun -2% zarar
+    check("SHORT exit yo'q @ narx -2% (TP 4%)", ps.check_exit() is None)
+    ps.update(0.96)  # narx -4% -> SHORT uchun +4% -> TP
+    check("SHORT exit WIN @ narx -4%", ps.check_exit() == "WIN")
+    ps.update(1.02)  # narx +2% -> SHORT uchun -2% zarar -> SL
     check("SHORT exit LOSS @ narx +2%", ps.check_exit() == "LOSS")
 
     # yo'nalish tanlash (evaluate_token)
