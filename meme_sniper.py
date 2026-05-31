@@ -101,14 +101,15 @@ PAIR_TO_NAME = {v: k for k, v in TOKENS.items()}
 ALLOW_LONG = True            # narx ko'tarilishidan foyda
 ALLOW_SHORT = True           # narx tushishidan foyda
 
-# Confluence filtr chegaralari
-BTC_24H_FLOOR = -1.0         # LONG:  BTC 24h > -1%
-BTC_24H_CEIL = 1.0           # SHORT: BTC 24h < +1%
-VOL_RATIO_MIN = 1.5          # 24h vol / 7d avg >= 1.5 (yo'nalishdan qat'i nazar)
-MOM_MIN, MOM_MAX = 1.5, 3.0  # 30m o'zgarish kattaligi [1.5%, 3.0%] (>10% = FOMO)
-FOMO_LEVEL = 10.0            # |o'zgarish| 10% dan oshsa FOMO/panika
-FUNDING_MAX = 0.001          # LONG:  funding < +0.1% (longlar qizimagan)
-FUNDING_MIN = -0.001         # SHORT: funding > -0.1% (shortlar qizimagan)
+# Confluence filtr chegaralari (YUMSHATILGAN — ko'proq signal)
+BTC_24H_FLOOR = -3.0         # LONG:  BTC 24h > -3%  (faqat kuchli tushishda blok)
+BTC_24H_CEIL = 3.0           # SHORT: BTC 24h < +3%  (faqat kuchli ko'tarilishda blok)
+VOL_RATIO_MIN = 0.8          # 24h vol / 7d avg >= 0.8 (o'rtacha faollik yetarli)
+MOM_MIN, MOM_MAX = 0.3, 8.0  # 30m o'zgarish kattaligi [0.3%, 8.0%] (keng oyna)
+FOMO_LEVEL = 15.0            # |o'zgarish| 15% dan oshsa FOMO/panika
+FUNDING_MAX = 0.003          # LONG:  funding < +0.3%
+FUNDING_MIN = -0.003         # SHORT: funding > -0.3%
+MIN_FILTERS = 3              # 3/4 filtr yashil bo'lsa kirish (4 shart emas)
 
 # Fayllar
 CSV_FILE = "trades_sniper.csv"
@@ -382,14 +383,14 @@ class Position:
 # ═══════════════════════════════════════════════════════════════════
 def btc_filter(btc_1h, btc_24h, side="LONG"):
     """FILTR 1 - Ota Trend (BTC).
-    LONG : BTC 1h > 0  VA  24h > -1%   (BTC ko'tarilyapti)
-    SHORT: BTC 1h < 0  VA  24h < +1%   (BTC tushyapti)
+    LONG : BTC 1h > -0.3%  VA  24h > -3%  (kuchli tushishda blok)
+    SHORT: BTC 1h < +0.3%  VA  24h < +3%  (kuchli ko'tarilishda blok)
     """
     if btc_1h is None or btc_24h is None:
         return False
     if side == "SHORT":
-        return btc_1h < 0 and btc_24h < BTC_24H_CEIL
-    return btc_1h > 0 and btc_24h > BTC_24H_FLOOR
+        return btc_1h < 0.3 and btc_24h < BTC_24H_CEIL
+    return btc_1h > -0.3 and btc_24h > BTC_24H_FLOOR
 
 
 def volume_filter(volume_ratio):
@@ -401,9 +402,9 @@ def volume_filter(volume_ratio):
 
 
 def momentum_filter(change_30m, side="LONG"):
-    """FILTR 3 - Mahalliy momentum (|o'zgarish| 10% dan oshsa FOMO).
-    LONG :  +1.5% .. +3.0%   (yuqoriga harakat)
-    SHORT:  -3.0% .. -1.5%   (pastga harakat)
+    """FILTR 3 - Mahalliy momentum (keng oyna, FOMO guard).
+    LONG :  +0.3% .. +8.0%   (yuqoriga harakat)
+    SHORT:  -8.0% .. -0.3%   (pastga harakat)
     """
     if change_30m is None:
         return False
@@ -413,9 +414,9 @@ def momentum_filter(change_30m, side="LONG"):
 
 
 def funding_filter(funding, side="LONG"):
-    """FILTR 4 - Funding rate.
-    LONG : funding < +0.1%   (longlar haddan tashqari qizimagan)
-    SHORT: funding > -0.1%   (shortlar haddan tashqari qizimagan)
+    """FILTR 4 - Funding rate (keng chegara).
+    LONG : funding < +0.3%
+    SHORT: funding > -0.3%
     """
     if funding is None:
         return False
@@ -720,7 +721,7 @@ class MemeSniper:
             for key, ok in flags.items():
                 if not ok:
                     self.filter_blocks[key] += 1
-            if all(flags.values()):
+            if score >= MIN_FILTERS:
                 self.open_position(pair, sig, side)
                 if len(self.positions) >= MAX_POSITIONS:
                     break
@@ -819,10 +820,10 @@ class MemeSniper:
             fr = sig.get("funding")
             lines.append(row(f"  Funding:  {light('', flags['funding'])} "
                              f"{(signed(fr*100,'%',3) if fr is not None else 'n/a')}"))
-            if all(flags.values()):
-                tail = green(f"4/4 yashil, {side} KIRISH!")
+            if score >= MIN_FILTERS:
+                tail = green(f"{score}/4 yashil, {side} KIRISH!")
             else:
-                tail = yellow(f"{score}/4 yashil, kutilmoqda")
+                tail = yellow(f"{score}/4 yashil, kutilmoqda (kerak {MIN_FILTERS})")
             lines.append(row(f"  -> {tail}"))
         else:
             lines.append(row("  ma'lumot kutilmoqda..."))
@@ -1037,34 +1038,39 @@ def _selftest():
           b["mode"] == "2%" and b["tp"] == 2.0 and b["sl"] == -2.0)
     check("select_mode default -> 2%", d["mode"] == "2%")
 
-    # filtrlar - LONG
-    check("btc_filter LONG green", btc_filter(0.8, 2.1) is True)
-    check("btc_filter LONG red (1h<=0)", btc_filter(-0.2, 2.1) is False)
-    check("btc_filter LONG red (24h<=-1)", btc_filter(0.8, -1.5) is False)
-    check("volume_filter 1.8x green", volume_filter(1.8) is True)
-    check("volume_filter 1.2x red", volume_filter(1.2) is False)
+    # filtrlar - LONG (yumshatilgan chegaralar)
+    check("btc_filter LONG green (1h flat)", btc_filter(0.0, 2.1) is True)
+    check("btc_filter LONG green (1h -0.2)", btc_filter(-0.2, 2.1) is True)
+    check("btc_filter LONG red (1h<-0.3)", btc_filter(-0.5, 2.1) is False)
+    check("btc_filter LONG red (24h<=-3)", btc_filter(0.8, -3.5) is False)
+    check("volume_filter 1.0x green", volume_filter(1.0) is True)
+    check("volume_filter 0.5x red", volume_filter(0.5) is False)
     check("momentum LONG 2.0 green", momentum_filter(2.0) is True)
-    check("momentum LONG 0.7 red (past)", momentum_filter(0.7) is False)
-    check("momentum LONG 12 red (FOMO)", momentum_filter(12.0) is False)
+    check("momentum LONG 0.5 green (yumshat)", momentum_filter(0.5) is True)
+    check("momentum LONG 0.2 red (past)", momentum_filter(0.2) is False)
+    check("momentum LONG 9 red (FOMO)", momentum_filter(9.0) is False)
     check("funding LONG 0.0002 green", funding_filter(0.0002) is True)
-    check("funding LONG 0.0015 red", funding_filter(0.0015) is False)
+    check("funding LONG 0.004 red", funding_filter(0.004) is False)
 
     # filtrlar - SHORT (teskari)
-    check("btc_filter SHORT green (1h<0,24h<1)",
-          btc_filter(-0.5, -0.3, "SHORT") is True)
-    check("btc_filter SHORT red (1h>0)", btc_filter(0.5, -0.3, "SHORT") is False)
-    check("btc_filter SHORT red (24h>=1)",
-          btc_filter(-0.5, 1.5, "SHORT") is False)
+    check("btc_filter SHORT green (1h flat)",
+          btc_filter(0.0, -0.3, "SHORT") is True)
+    check("btc_filter SHORT red (1h>0.3)",
+          btc_filter(0.5, -0.3, "SHORT") is False)
+    check("btc_filter SHORT red (24h>=3)",
+          btc_filter(-0.5, 3.5, "SHORT") is False)
     check("momentum SHORT -2.0 green", momentum_filter(-2.0, "SHORT") is True)
+    check("momentum SHORT -0.5 green (yumshat)",
+          momentum_filter(-0.5, "SHORT") is True)
     check("momentum SHORT +2.0 red", momentum_filter(2.0, "SHORT") is False)
-    check("momentum SHORT -0.7 red (past)",
-          momentum_filter(-0.7, "SHORT") is False)
-    check("momentum SHORT -12 red (panika)",
-          momentum_filter(-12.0, "SHORT") is False)
+    check("momentum SHORT -0.2 red (past)",
+          momentum_filter(-0.2, "SHORT") is False)
+    check("momentum SHORT -9 red (panika)",
+          momentum_filter(-9.0, "SHORT") is False)
     check("funding SHORT -0.0002 green",
           funding_filter(-0.0002, "SHORT") is True)
-    check("funding SHORT -0.0015 red",
-          funding_filter(-0.0015, "SHORT") is False)
+    check("funding SHORT -0.004 red",
+          funding_filter(-0.004, "SHORT") is False)
 
     # indikatorlar (sun'iy klines: [t,o,h,l,c,v,ct,qv,...])
     kl = []
@@ -1121,12 +1127,12 @@ def _selftest():
     ev = MemeSniper.__new__(MemeSniper)
     ev.btc_1h, ev.btc_24h = -0.5, -0.3                  # SHORT bozor
     sig_s = {"name": "WIF", "price": 1.0, "change_30m": -2.0,
-             "volatility": 2.3, "volume_ratio": 1.8, "funding": -0.0002}
+             "volatility": 2.3, "volume_ratio": 1.0, "funding": -0.0002}
     side_s, flags_s, score_s = ev.evaluate_token(sig_s)
     check("evaluate_token -> SHORT 4/4", side_s == "SHORT" and score_s == 4)
     ev.btc_1h, ev.btc_24h = 0.8, 2.1                    # LONG bozor
     sig_l = {"name": "WIF", "price": 1.0, "change_30m": 2.0,
-             "volatility": 2.3, "volume_ratio": 1.8, "funding": 0.0002}
+             "volatility": 2.3, "volume_ratio": 1.0, "funding": 0.0002}
     side_l, flags_l, score_l = ev.evaluate_token(sig_l)
     check("evaluate_token -> LONG 4/4", side_l == "LONG" and score_l == 4)
 
